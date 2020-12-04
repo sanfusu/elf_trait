@@ -1,4 +1,11 @@
 use std::{convert::Into, ops::Range};
+pub trait Field {
+    type FieldType;
+    fn from_le_bytes(val: &[u8]) -> Self::FieldType;
+    fn from_be_bytes(val: &[u8]) -> Self::FieldType;
+    fn range() -> Range<usize>;
+}
+
 /// Layout trait 用于定义修改二进制格式相关的函数
 ///（[`Layout`] 为只读布局，关于可变布局参见 [`LayoutMut`]）。
 /// 通常除了需要实现者使用枚举类型定义各字段类型外，还需要定义各字段的顺序或偏移量，以方便实现 [`Self::with`]  方法。
@@ -8,39 +15,41 @@ use std::{convert::Into, ops::Range};
 ///
 /// **Elf 中大部分结构体都需要实现该 trait**
 pub trait Layout {
-    /// [`Self::Field`] 定义二进制格式中的各字段类型，一般用枚举类型定义
-    /// # Example
-    /// ```
-    /// enum Ehdr32Layout{
-    ///     e_type(Otype),
-    ///     e_phoff(u32),
-    /// }
-    /// ```
-    type Field;
-    /// with 函数一般用于修改二进制格式中的某个字段，
-    /// 返回 `&mut Self` 类型，方便链式调用
+    /// with 函数返回某个字段的值
     /// # Example
     /// ```not_run
-    /// self.with(Ehdr32Layout::e_type(1)).with(Ehdr32Layout::e_phoff(2))
+    /// let value = self.with::<Field1>();
     /// ```
-    fn with(&self, layout: Self::Field) -> Self::Field;
+    fn with<T>(&self) -> T::FieldType
+    where
+        T: Field;
 }
 
 /// 和 [`Layout`] 类似，但是 `LayoutMut` 可以配合 [`Accessor::set`] 使用
 pub trait LayoutMut {
-    type Field;
-    fn with(&mut self, layout: Self::Field) -> &mut Self;
+    /// with 函数一般用于修改二进制格式中的某个字段，
+    /// 返回 `&mut Self` 类型，方便链式调用
+    /// # Example
+    /// ```not_run
+    /// self.with::<Field1>(value1).with::<Field2>(value2);
+    /// ```
+    fn with<T: Field>(&mut self, value: T::FieldType) -> &mut Self;
 }
 
-pub trait Accessor {
+pub trait Getter {
+    type Encode;
+    /// Accessor 类型中存储 Encode 字段，一般是对 Self 类型的封装。
+    type Accessor: Layout;
+    fn getter(&self, encode: Self::Encode) -> Self::Accessor;
+}
+
+pub trait Setter {
     type Setter: LayoutMut;
-    type Getter: Layout;
     /// 用于描述字节序的类型
     /// 一般来讲只有两种：大端和小段。
     /// 但是为了防止不同的二进制格式还有其他的字节序或编码方式，这里保留给实现者定义。
     type Encode;
-    fn set(&mut self, encode: Self::Encode) -> &mut Self::Setter;
-    fn get(&self, encode: Self::Encode) -> &Self::Getter;
+    fn setter(&mut self, encode: Self::Encode) -> &mut Self::Setter;
 }
 
 pub trait AsBytes {
@@ -71,7 +80,7 @@ pub trait AsBytes {
     }
 }
 
-pub trait Ident: Accessor {
+pub trait Ident: Setter {
     fn magic(&self) -> u32;
     fn encode(&self) -> Self::Encode;
 }
@@ -85,7 +94,7 @@ pub trait Ident: Accessor {
 /// const EHDR32_PHOFF_OFFSET: usize;
 /// struct Ehdr32(&[u8])
 /// ```
-pub trait Ehdr: AsBytes + Accessor {
+pub trait Ehdr: AsBytes + Setter {
     type Machine: Into<usize>;
     type Version: Into<usize>;
     type Otype: Into<usize>;
@@ -134,7 +143,7 @@ pub trait Ehdr: AsBytes + Accessor {
 pub trait Strtab: std::ops::Index<usize, Output = String> {}
 
 /// Section Header 需要实现的 trait
-pub trait Shdr: AsBytes + Accessor {
+pub trait Shdr: AsBytes + Setter {
     /// 返回 shdr 中的 sh_name 字段
     fn name_idx(&self) -> usize;
     /// 返回 section 相对于文件起始的偏移量
@@ -144,5 +153,101 @@ pub trait Shdr: AsBytes + Accessor {
     /// 返回 section 在文件中的范围
     fn sec_range(&self) -> Range<usize> {
         self.offset()..(self.offset() + self.size())
+    }
+}
+
+#[cfg(test)]
+mod test {
+    #![allow(dead_code)]
+    #![allow(unused_variables)]
+
+    use std::{convert::TryInto, ops::Range};
+
+    use crate::{Field, Getter, Layout};
+
+    enum TestField {
+        Field1,
+        Field2,
+    }
+    struct Field1(u8);
+    impl Field for Field1 {
+        fn range() -> Range<usize> {
+            0..1
+        }
+
+        fn from_le_bytes(val: &[u8]) -> u8 {
+            u8::from_le(val[0])
+        }
+        fn from_be_bytes(val: &[u8]) -> u8 {
+            u8::from_be(val[0])
+        }
+
+        type FieldType = u8;
+    }
+    struct Field2(u32);
+    impl Field for Field2 {
+        fn range() -> Range<usize> {
+            1..5
+        }
+
+        fn from_le_bytes(val: &[u8]) -> Self::FieldType {
+            u32::from_le_bytes(val.try_into().unwrap())
+        }
+        fn from_be_bytes(val: &[u8]) -> Self::FieldType {
+            u32::from_be_bytes(val.try_into().unwrap())
+        }
+
+        type FieldType = u32;
+    }
+    enum TestFieldMut {
+        Field1(u8),
+        Field2(u8),
+    }
+
+    impl super::Layout for Test<'_> {
+        fn with<T>(&self) -> T::FieldType
+        where
+            T: Field,
+        {
+            match self.encode {
+                Encode::Le => T::from_le_bytes(&self.data[T::range()]),
+                Encode::Be => T::from_be_bytes(&self.data[T::range()]),
+            }
+        }
+    }
+    enum Encode {
+        Le,
+        Be,
+    }
+    struct Test<'a> {
+        data: &'a [u8],
+        encode: Encode,
+    }
+    impl<'a> Test<'a> {
+        fn new(data: &'a [u8]) -> Test {
+            Test {
+                data,
+                encode: Encode::Le,
+            }
+        }
+    }
+    impl<'a> super::Getter for Test<'a> {
+        type Encode = Encode;
+
+        fn getter(&self, encode: Self::Encode) -> Self::Accessor {
+            Self::Accessor {
+                data: self.data,
+                encode,
+            }
+        }
+        type Accessor = Test<'a>;
+    }
+    #[test]
+    fn test() {
+        let s1 = [0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0];
+        let a = Test::new(&s1[0..5]);
+        let getter = a.getter(Encode::Le);
+        println!("{:#x?}", getter.with::<Field2>());
+        println!("{:#x?}", getter.with::<Field1>());
     }
 }
