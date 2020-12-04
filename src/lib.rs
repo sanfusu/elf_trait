@@ -19,6 +19,12 @@ pub trait Layout {
     /// self.with(Ehdr32Layout::e_type(1)).with(Ehdr32Layout::e_phoff(2))
     /// ```
     fn with(&mut self, layout: Self::Layout) -> &mut Self;
+    fn get(&self, layout: Self::Layout) -> Self::Layout;
+}
+
+pub trait Setter {
+    type Setter: Layout;
+    fn set(&mut self) -> &mut Self::Setter;
 }
 
 pub trait AsBytes {
@@ -49,7 +55,7 @@ pub trait AsBytes {
     }
 }
 
-pub trait Ident: Layout {
+pub trait Ident: Setter {
     type Encode;
     fn magic(&self) -> u32;
     fn encode(&self) -> Self::Encode;
@@ -64,7 +70,7 @@ pub trait Ident: Layout {
 /// const EHDR32_PHOFF_OFFSET: usize;
 /// struct Ehdr32(&[u8])
 /// ```
-pub trait Ehdr: AsBytes + Layout {
+pub trait Ehdr: AsBytes + Setter {
     type Machine: Into<usize>;
     type Version: Into<usize>;
     type Otype: Into<usize>;
@@ -113,7 +119,7 @@ pub trait Ehdr: AsBytes + Layout {
 pub trait Strtab: std::ops::Index<usize, Output = String> {}
 
 /// Section Header 需要实现的 trait
-pub trait Shdr: AsBytes + Layout {
+pub trait Shdr: AsBytes + Setter {
     /// 返回 shdr 中的 sh_name 字段
     fn name_idx(&self) -> usize;
     /// 返回 section 相对于文件起始的偏移量
