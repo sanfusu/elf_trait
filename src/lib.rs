@@ -1,55 +1,49 @@
 use std::{convert::Into, ops::Range};
 pub trait Field {
     type FieldType;
+    /// TODO: BytesType 可以直接替换为 [u8; std::mem::size_of::<Self::FieldType>()]，但目前 rust 不支持这种写法
+    type BytesType: AsRef<[u8]>;
+
     fn from_le_bytes(val: &[u8]) -> Self::FieldType;
     fn from_be_bytes(val: &[u8]) -> Self::FieldType;
+    fn to_be_bytes(self) -> Self::BytesType;
+    fn to_le_bytes(self) -> Self::BytesType;
+    /// range 函数一般会被 Layout 中的 with 函数调用，获取 slice 后，在调用 from_le(ge)_bytes 从而获取字段的值。
     fn range() -> Range<usize>;
 }
 
-/// Layout trait 用于定义修改二进制格式相关的函数
-///（[`Layout`] 为只读布局，关于可变布局参见 [`LayoutMut`]）。
-/// 通常除了需要实现者使用枚举类型定义各字段类型外，还需要定义各字段的顺序或偏移量，以方便实现 [`Self::with`]  方法。
-///
-/// 另外，在实现 [`Self::with`] 时需要注意字节序。
-/// 这一点可以配合 [`Accessor::get`] 方法使用。
-///
-/// **Elf 中大部分结构体都需要实现该 trait**
-pub trait Layout {
-    /// with 函数返回某个字段的值
+pub trait Getter {
+    type Encode;
+    /// get 函数返回某个字段的值
     /// # Example
     /// ```not_run
-    /// let value = self.with::<Field1>();
+    /// let value = self.get::<Field1>();
     /// ```
-    fn with<T>(&self) -> T::FieldType
+    fn get<T>(&self) -> T::FieldType
     where
         T: Field;
+    fn getter(&self, encode: Self::Encode) -> Self;
+
+    /// out 将字段值赋值给 dest，并返回 Getter 自身的引用，方便链式调用一条语句输出多个值。
+    fn out<T: Field>(&self, dest: &mut T::FieldType) -> &Self {
+        *dest = self.get::<T>();
+        self
+    }
 }
 
-/// 和 [`Layout`] 类似，但是 `LayoutMut` 可以配合 [`Accessor::set`] 使用
-pub trait LayoutMut {
+pub trait Setter {
+    /// 用于描述字节序的类型
+    /// 一般来讲只有两种：大端和小段。
+    /// 但是为了防止不同的二进制格式还有其他的字节序或编码方式，这里保留给实现者定义。
+    type Encode;
     /// with 函数一般用于修改二进制格式中的某个字段，
     /// 返回 `&mut Self` 类型，方便链式调用
     /// # Example
     /// ```not_run
     /// self.with::<Field1>(value1).with::<Field2>(value2);
     /// ```
-    fn with<T: Field>(&mut self, value: T::FieldType) -> &mut Self;
-}
-
-pub trait Getter {
-    type Encode;
-    /// Accessor 类型中存储 Encode 字段，一般是对 Self 类型的封装。
-    type Accessor: Layout;
-    fn getter(&self, encode: Self::Encode) -> Self::Accessor;
-}
-
-pub trait Setter {
-    type Setter: LayoutMut;
-    /// 用于描述字节序的类型
-    /// 一般来讲只有两种：大端和小段。
-    /// 但是为了防止不同的二进制格式还有其他的字节序或编码方式，这里保留给实现者定义。
-    type Encode;
-    fn setter(&mut self, encode: Self::Encode) -> &mut Self::Setter;
+    fn with<T: Field>(&self, value: T) -> &Self;
+    fn setter(&self, encode: Self::Encode) -> Self;
 }
 
 pub trait AsBytes {
@@ -161,14 +155,9 @@ mod test {
     #![allow(dead_code)]
     #![allow(unused_variables)]
 
-    use std::{convert::TryInto, ops::Range};
+    use std::{cell::RefCell, convert::TryInto, ops::Range, rc::Rc};
 
-    use crate::{Field, Getter, Layout};
-
-    enum TestField {
-        Field1,
-        Field2,
-    }
+    use crate::{Field, Getter, Setter};
     struct Field1(u8);
     impl Field for Field1 {
         fn range() -> Range<usize> {
@@ -181,11 +170,22 @@ mod test {
         fn from_be_bytes(val: &[u8]) -> u8 {
             u8::from_be(val[0])
         }
-
+        type BytesType = [u8; 1];
         type FieldType = u8;
+
+        fn to_be_bytes(self) -> Self::BytesType {
+            self.0.to_be_bytes()
+        }
+
+        fn to_le_bytes(self) -> Self::BytesType {
+            self.0.to_le_bytes()
+        }
     }
     struct Field2(u32);
     impl Field for Field2 {
+        type FieldType = u32;
+        type BytesType = [u8; 4];
+
         fn range() -> Range<usize> {
             1..5
         }
@@ -197,57 +197,95 @@ mod test {
             u32::from_be_bytes(val.try_into().unwrap())
         }
 
-        type FieldType = u32;
-    }
-    enum TestFieldMut {
-        Field1(u8),
-        Field2(u8),
-    }
+        fn to_be_bytes(self) -> Self::BytesType {
+            self.0.to_be_bytes()
+        }
 
-    impl super::Layout for Test<'_> {
-        fn with<T>(&self) -> T::FieldType
-        where
-            T: Field,
-        {
-            match self.encode {
-                Encode::Le => T::from_le_bytes(&self.data[T::range()]),
-                Encode::Be => T::from_be_bytes(&self.data[T::range()]),
-            }
+        fn to_le_bytes(self) -> Self::BytesType {
+            self.0.to_le_bytes()
         }
     }
+
     enum Encode {
         Le,
         Be,
     }
-    struct Test<'a> {
-        data: &'a [u8],
+    struct Test {
+        data: Rc<RefCell<[u8]>>,
         encode: Encode,
     }
-    impl<'a> Test<'a> {
-        fn new(data: &'a [u8]) -> Test {
+    impl Test {
+        fn new(data: Rc<RefCell<[u8]>>) -> Test {
             Test {
                 data,
                 encode: Encode::Le,
             }
         }
     }
-    impl<'a> super::Getter for Test<'a> {
+    impl super::Getter for Test {
         type Encode = Encode;
 
-        fn getter(&self, encode: Self::Encode) -> Self::Accessor {
-            Self::Accessor {
-                data: self.data,
+        fn getter(&self, encode: Self::Encode) -> Self {
+            Self {
+                data: self.data.clone(),
                 encode,
             }
         }
-        type Accessor = Test<'a>;
+        fn get<T>(&self) -> T::FieldType
+        where
+            T: Field,
+        {
+            match self.encode {
+                Encode::Le => T::from_le_bytes(&self.data.borrow()[T::range()]),
+                Encode::Be => T::from_be_bytes(&self.data.borrow()[T::range()]),
+            }
+        }
+    }
+    impl super::Setter for Test {
+        type Encode = Encode;
+
+        fn setter(&self, encode: Self::Encode) -> Self {
+            Self {
+                data: self.data.clone(),
+                encode,
+            }
+        }
+        fn with<T: Field>(&self, value: T) -> &Self {
+            match self.encode {
+                Encode::Le => {
+                    self.data.borrow_mut()[T::range()]
+                        .copy_from_slice(value.to_le_bytes().as_ref());
+                }
+                Encode::Be => {
+                    self.data.borrow_mut()[T::range()]
+                        .copy_from_slice(value.to_be_bytes().as_ref());
+                }
+            };
+            self
+        }
     }
     #[test]
     fn test() {
-        let s1 = [0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0];
-        let a = Test::new(&s1[0..5]);
-        let getter = a.getter(Encode::Le);
-        println!("{:#x?}", getter.with::<Field2>());
-        println!("{:#x?}", getter.with::<Field1>());
+        let a = Test::new(Rc::new(RefCell::new([
+            0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0,
+        ])));
+
+        let getter = a.getter(Encode::Be);
+        println!("{:#x?}", getter.get::<Field1>());
+        println!("{:#x?}", getter.get::<Field2>());
+
+        let setter = a.setter(Encode::Le);
+        setter
+            .with(Field1(0x12))
+            .with(Field2(0x12345678))
+            .setter(Encode::Le)
+            .with(Field1(0x23));
+        println!("{:#x?}", getter.get::<Field1>());
+        println!("{:#x?}", getter.get::<Field2>());
+
+        let mut field1: <Field1 as Field>::FieldType = 0;
+        let mut field2: <Field2 as Field>::FieldType = 0;
+        getter.out::<Field1>(&mut field1).out::<Field2>(&mut field2);
+        println!("{:#x?}, {:#x?}", field1, field2);
     }
 }
