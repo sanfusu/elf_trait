@@ -1,50 +1,6 @@
 use std::{convert::Into, ops::Range};
-pub trait Field {
-    type FieldType;
-    /// TODO: BytesType 可以直接替换为 [u8; std::mem::size_of::<Self::FieldType>()]，但目前 rust 不支持这种写法
-    type BytesType: AsRef<[u8]>;
-
-    fn from_le_bytes(val: &[u8]) -> Self::FieldType;
-    fn from_be_bytes(val: &[u8]) -> Self::FieldType;
-    fn to_be_bytes(self) -> Self::BytesType;
-    fn to_le_bytes(self) -> Self::BytesType;
-    /// range 函数一般会被 Layout 中的 with 函数调用，获取 slice 后，在调用 from_le(ge)_bytes 从而获取字段的值。
-    fn range() -> Range<usize>;
-}
-
-pub trait Getter {
-    type Encode;
-    /// get 函数返回某个字段的值
-    /// # Example
-    /// ```not_run
-    /// let value = self.get::<Field1>();
-    /// ```
-    fn get<T>(&self) -> T::FieldType
-    where
-        T: Field;
-    fn getter(&self, encode: Self::Encode) -> Self;
-
-    /// out 将字段值赋值给 dest，并返回 Getter 自身的引用，方便链式调用一条语句输出多个值。
-    fn out<T: Field>(&self, dest: &mut T::FieldType) -> &Self {
-        *dest = self.get::<T>();
-        self
-    }
-}
-
-pub trait Setter {
-    /// 用于描述字节序的类型
-    /// 一般来讲只有两种：大端和小段。
-    /// 但是为了防止不同的二进制格式还有其他的字节序或编码方式，这里保留给实现者定义。
-    type Encode;
-    /// with 函数一般用于修改二进制格式中的某个字段，
-    /// 返回 `&mut Self` 类型，方便链式调用
-    /// # Example
-    /// ```not_run
-    /// self.with::<Field1>(value1).with::<Field2>(value2);
-    /// ```
-    fn with<T: Field>(&self, value: T) -> &Self;
-    fn setter(&self, encode: Self::Encode) -> Self;
-}
+pub mod accessor;
+pub use accessor::*;
 
 pub trait AsBytes {
     /// 将 Ehdr 结构体序列化
@@ -74,9 +30,9 @@ pub trait AsBytes {
     }
 }
 
-pub trait Ident: Setter {
+pub trait Ident: Setter + Getter {
     fn magic(&self) -> u32;
-    fn encode(&self) -> Self::Encode;
+    fn encode(&self) -> Encode;
 }
 
 /// 实现 Ehdr trait 的结构体可以有很多种定义方法。
@@ -88,7 +44,7 @@ pub trait Ident: Setter {
 /// const EHDR32_PHOFF_OFFSET: usize;
 /// struct Ehdr32(&[u8])
 /// ```
-pub trait Ehdr: AsBytes + Setter {
+pub trait Ehdr: AsBytes + Setter + Getter {
     type Machine: Into<usize>;
     type Version: Into<usize>;
     type Otype: Into<usize>;
@@ -137,7 +93,7 @@ pub trait Ehdr: AsBytes + Setter {
 pub trait Strtab: std::ops::Index<usize, Output = String> {}
 
 /// Section Header 需要实现的 trait
-pub trait Shdr: AsBytes + Setter {
+pub trait Shdr: AsBytes + Setter + Getter {
     /// 返回 shdr 中的 sh_name 字段
     fn name_idx(&self) -> usize;
     /// 返回 section 相对于文件起始的偏移量
@@ -157,8 +113,9 @@ mod test {
 
     use std::{cell::RefCell, convert::TryInto, ops::Range, rc::Rc};
 
-    use crate::{Field, Getter, Setter};
+    use crate::{Encode, Field, Getter, Mutable, Setter};
     struct Field1(u8);
+    impl Mutable for Field1 {}
     impl Field for Field1 {
         fn range() -> Range<usize> {
             0..1
@@ -182,6 +139,7 @@ mod test {
         }
     }
     struct Field2(u32);
+    impl Mutable for Field2 {}
     impl Field for Field2 {
         type FieldType = u32;
         type BytesType = [u8; 4];
@@ -206,10 +164,6 @@ mod test {
         }
     }
 
-    enum Encode {
-        Le,
-        Be,
-    }
     struct Test {
         data: Rc<RefCell<[u8]>>,
         encode: Encode,
@@ -222,10 +176,9 @@ mod test {
             }
         }
     }
-    impl super::Getter for Test {
-        type Encode = Encode;
 
-        fn getter(&self, encode: Self::Encode) -> Self {
+    impl super::Getter for Test {
+        fn getter(&self, encode: Encode) -> Self {
             Self {
                 data: self.data.clone(),
                 encode,
@@ -242,9 +195,7 @@ mod test {
         }
     }
     impl super::Setter for Test {
-        type Encode = Encode;
-
-        fn setter(&self, encode: Self::Encode) -> Self {
+        fn setter(&self, encode: Encode) -> Self {
             Self {
                 data: self.data.clone(),
                 encode,
