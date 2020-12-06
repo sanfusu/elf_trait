@@ -1,5 +1,6 @@
 use accessor::*;
 use std::ops::Range;
+// 这里定义的所有 trait 都应该是为了解析而必备的。
 
 pub trait Ident: Setter + Getter {
     /// Encode 字段必须确保大小端两种读法一致，所以 BytesType 字节长度必须为 1.
@@ -55,6 +56,6 @@ where
     type Header: Phdr + Field;
 }
 
-pub trait Section {
+pub trait Section: Getter {
     type Header: Shdr + Field;
 }
