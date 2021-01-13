@@ -17,28 +17,26 @@
 
 use accessor::*;
 use std::ops::Range;
-// 这里定义的所有 trait 都应该是为了解析而必备的。
 
+// Elf 文件一般两种操作：修改值，插入新值
 /// ElfObject 指的时 Elf 中诸如 Ehdr 这类结构体，具体实现可以直接将 range 字段暴露出来。
-///
-/// # Example
-/// ```
-/// use std::ops::Range;
-///
-/// pub struct Ehdr32 {
-///     src: std::rc::Rc<std::cell::RefCell<[u8]>>,
-///     encode: accessor::Encode,
-///     range: Range<usize>,
-/// }
-///
-/// impl elf::ElfObject for Ehdr32 {
-///     fn set_range(&mut self, range:Range<usize>) {
-///         self.range = range;
-///     }
-/// }
-/// ```
-pub trait ElfObject {
-    fn set_range(&mut self, range: Range<usize>);
+pub trait ElfObject: Sized {
+    fn as_slice<'a>(&'a self) -> &'a [u8] {
+        unsafe {
+            std::slice::from_raw_parts(
+                self as *const Self as *const u8,
+                std::mem::size_of::<Self>(),
+            )
+        }
+    }
+    fn as_mut_slice<'a>(&'a mut self) -> &'a mut [u8] {
+        unsafe {
+            std::slice::from_raw_parts_mut(
+                self as *mut Self as *mut u8,
+                std::mem::size_of::<Self>(),
+            )
+        }
+    }
 }
 
 pub trait Ident: Setter + Getter {
@@ -46,6 +44,7 @@ pub trait Ident: Setter + Getter {
     /// 该字段的值通常会被缓存在结构体中。
     type Encode: Field<FieldType = Encode, BytesType = [u8; 1]>;
 }
+
 pub trait Ehdr: Setter + Getter {
     /// PhtRange 字段的值用于表示 Program Header Table 的范围。
     /// 方便 Elf 解析函数解析之初能够确定 pht 的原始值。
@@ -74,21 +73,10 @@ pub trait Shdr: Setter + Getter {
     type SecRange: Field<FieldType = Range<usize>>;
 }
 
-pub trait ShdrTab<T>: std::ops::Index<usize, Output = T> + ElfObject
-where
-    T: Shdr,
-{
-}
-
 /// Section Header 需要实现的 trait
 pub trait Phdr: Setter + Getter {
     /// Section 在文件中的范围
     type SegRange: Field<FieldType = Range<usize>>;
-}
-pub trait PhdrTab<T>: std::ops::Index<usize, Output = T>
-where
-    T: Phdr,
-{
 }
 
 pub trait Segmemt<T>: std::ops::Index<usize, Output = T>

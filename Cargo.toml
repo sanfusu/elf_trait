@@ -1,10 +1,10 @@
 [package]
 authors = ["sanfusu <sanfusu@foxmail.com>"]
 edition = "2018"
-name = "elf"
+name = "elf_trait"
 version = "0.1.0"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-accessor = {git = "https://github.com/sanfusu/accessor"}
+accessor = { git = "https://github.com/sanfusu/accessor" }
